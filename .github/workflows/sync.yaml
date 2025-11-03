@@ -1,55 +1,62 @@
-name: Sync Docs
+name: Sync FlowUs to Halo
 
+# 触发方式：手动触发 + 定时触发（每6小时） + 外部事件触发
 on:
-  # 允许手动push触发
-#  push:
-#    branches:
-#      - master
-  # 允许外部仓库事件触发
+  workflow_dispatch:  # 手动触发（添加后会显示Run workflow按钮）
+  schedule:
+    - cron: '0 */6 * * *'  # 每6小时自动同步一次（UTC时间，换算成北京时间需+8小时）
   repository_dispatch:
-    types:
-      - deploy
+    types: [deploy]  # 外部事件触发（如ServerlessAPI调用）
 
 jobs:
-  build:
+  sync-docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # 超时时间10分钟，避免无限等待
 
     steps:
-      - name: 检查分支
-        uses: actions/checkout@master
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4  # 使用最新版本的checkout动作
 
-      - name: 安装node环境
-        uses: actions/setup-node@master
+      - name: 配置Node.js环境
+        uses: actions/setup-node@v4
         with:
-          node-version: "16.x"
+          node-version: 16.x
+          cache: 'npm'  # 缓存npm依赖，加速安装
 
-      - name: 安装依赖
+      - name: 安装项目依赖
         run: |
-          export TZ='Asia/Shanghai'
-          npm install --prod
+          echo "安装依赖中..."
+          npm install --production  # 只安装生产环境依赖，减少体积
+        continue-on-error: false  # 依赖安装失败则终止工作流
 
-      - name: 拉取文档
+      - name: 同步FlowUs数据到Halo
         env:
+          # 从GitHub Secrets中读取环境变量（需提前配置）
           FLOWUS_TABLE_PAGE_ID: ${{ secrets.FLOWUS_TABLE_PAGE_ID }}
           HALO_ENDPOINT: ${{ secrets.HALO_ENDPOINT }}
           HALO_TOKEN: ${{ secrets.HALO_TOKEN }}
           HALO_POLICY_NAME: ${{ secrets.HALO_POLICY_NAME }}
+          TZ: Asia/Shanghai  # 时区设置为北京时间
         run: |
-          npm run sync:local
-          npm run sync:halo
+          echo "开始同步FlowUs数据到Halo..."
+          npm run sync:local  # 拉取FlowUs数据到本地缓存
+          npm run sync:halo   # 将本地缓存同步到Halo服务器
+        continue-on-error: false  # 同步失败则终止，便于排查
 
-      - name: 配置Git用户名邮箱
+      - name: 提交更新后的本地缓存
         run: |
-          git config --global user.name "xxx"
-          git config --global user.email "xxx"
+          # 配置Git身份（使用GitHub Actions默认身份）
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+          
+          # 检查是否有缓存文件更新
+          git add elog.cache.json elog.cache.local.json
+          git diff --quiet --cached || git commit -m "Auto update cache: $(date +'%Y-%m-%d %H:%M:%S')"
+        continue-on-error: true  # 缓存提交失败不影响主流程
 
-      - name: 提交拉取的文档到GitHub仓库
-        run: |
-          echo `date +"%Y-%m-%d %H:%M:%S"` begin > time.txt
-          git add .
-          git commit -m "Refresh elog.cache.json" -a
-
-      - name: 推送文档到仓库
+      - name: 推送缓存更新到仓库
         uses: ad-m/github-push-action@master
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}  # 使用GitHub自动生成的临时token
+          branch: ${{ github.ref }}  # 推送到当前触发工作流的分支
+        continue-on-error: true  # 推送失败不影响主流程
